@@ -1,0 +1,68 @@
+name: "Label pull request"
+
+on:
+  pull_request:
+    types:
+      - "opened"
+  workflow_dispatch:
+    inputs:
+      number:
+        description: "Pull request number to label when triggering manually"
+        required: true
+        type: "string"
+
+permissions:
+  contents: "read"
+  issues: "write"
+  pull-requests: "read"
+
+concurrency:
+  group: "label-pull-request-${{ github.event.pull_request.number || inputs.number }}"
+  cancel-in-progress: true
+
+jobs:
+  label:
+    name: "Label pull request"
+    runs-on: "ubuntu-latest"
+
+    outputs:
+      labels: "${{ steps.suggest.outputs.labels }}"
+      advisory: "${{ steps.suggest.outputs.advisory }}"
+
+    steps:
+      # Install the label classifier straight from its repository, pinned to
+      # the commit under test.
+      - name: "Install the label classifier"
+        run: |
+          mkdir -p "${RUNNER_TEMP}/labeler"
+          cd "${RUNNER_TEMP}/labeler"
+          printf '{"repositories":[{"type":"vcs","url":"https://github.com/paulinevos/label-classifier"}],"require":{"vos/label-classifier":"dev-main#7fa5b5f3061a5474d3288b2f531a0614b929787c"}}\n' > composer.json
+          COMPOSER_AUTH='{"github-oauth":{"github.com":"${{ secrets.CLASSIFIER_TOKEN }}"}}' composer install --no-interaction --no-progress
+
+      # The command only suggests labels; this workflow decides what happens
+      # with the suggestion.
+      - id: "suggest"
+        name: "Suggest labels"
+        env:
+          PR_OPTION: "${{ inputs.number && format('--pr={0}', inputs.number) || '' }}"
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          JEV_API_KEY: ${{ secrets.JEV_API_KEY }}
+          JEV_MODEL: ${{ vars.JEV_MODEL || 'jev-1.13' }}
+          JEV_ENDPOINT: ${{ vars.JEV_ENDPOINT }}
+        run: php "${RUNNER_TEMP}/labeler/vendor/bin/label-pull-request" "$PR_OPTION"
+
+      # Adding labels only: labels already on the pull request are preserved,
+      # and nothing is removed.
+      - name: "Apply suggested labels"
+        if: "steps.suggest.outputs.labels != ''"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.pull_request.number || inputs.number }}
+          LABELS: ${{ steps.suggest.outputs.labels }}
+        run: |
+          echo "$LABELS" | tr ',' '\n' | while read -r label; do
+            [ -n "$label" ] && gh pr edit "$NUMBER" --repo "${{ github.repository }}" --add-label "$label"
+          done
